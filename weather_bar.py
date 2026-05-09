@@ -29,7 +29,9 @@ GLib.log_set_handler('Gtk', GLib.LogLevelFlags.LEVEL_CRITICAL, lambda *_: None)
 import argparse
 import json
 import os
+import ssl
 import threading
+import urllib.parse
 import urllib.request
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -42,66 +44,39 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, 'config.json')
 
 DEFAULT_CFG = {'city': '', 'unit': 'C', 'monitor': 0}
 
-# ── Weather code → emoji & stock icon name ───────────────────────────────────
+# ── Weather code → emoji, stock icon name & description ─────────────────────
 
-# Maps wttr.in weather code → (emoji, GNOME stock icon name)
-# (emoji, GNOME stock icon name)
-WX_ICON = {
-    113: ('☀️',  'weather-clear'),
-    116: ('⛅',  'weather-few-clouds'),
-    119: ('☁️',  'weather-overcast'),
-    122: ('☁️',  'weather-overcast'),
-    143: ('🌫️', 'weather-fog'),
-    176: ('🌦️', 'weather-showers-scattered'),
-    179: ('🌨️', 'weather-snow'),
-    182: ('🌧️', 'weather-showers'),
-    185: ('🌧️', 'weather-showers'),
-    200: ('⛈️', 'weather-storm'),
-    227: ('🌨️', 'weather-snow'),
-    230: ('❄️',  'weather-snow'),
-    248: ('🌫️', 'weather-fog'),
-    260: ('🌫️', 'weather-fog'),
-    263: ('🌦️', 'weather-showers-scattered'),
-    266: ('🌦️', 'weather-showers-scattered'),
-    281: ('🌧️', 'weather-showers'),
-    284: ('🌧️', 'weather-showers'),
-    293: ('🌦️', 'weather-showers-scattered'),
-    296: ('🌦️', 'weather-showers-scattered'),
-    299: ('🌧️', 'weather-showers'),
-    302: ('🌧️', 'weather-showers'),
-    305: ('🌧️', 'weather-showers'),
-    308: ('🌧️', 'weather-showers'),
-    311: ('🌧️', 'weather-showers'),
-    314: ('🌧️', 'weather-showers'),
-    317: ('🌧️', 'weather-showers'),
-    320: ('🌨️', 'weather-snow'),
-    323: ('🌨️', 'weather-snow'),
-    326: ('🌨️', 'weather-snow'),
-    329: ('❄️',  'weather-snow'),
-    332: ('❄️',  'weather-snow'),
-    335: ('❄️',  'weather-snow'),
-    338: ('❄️',  'weather-snow'),
-    350: ('🌧️', 'weather-showers'),
-    353: ('🌦️', 'weather-showers-scattered'),
-    356: ('🌧️', 'weather-showers'),
-    359: ('🌧️', 'weather-showers'),
-    362: ('🌧️', 'weather-showers'),
-    365: ('🌧️', 'weather-showers'),
-    368: ('🌨️', 'weather-snow'),
-    371: ('❄️',  'weather-snow'),
-    374: ('🌧️', 'weather-showers'),
-    377: ('🌧️', 'weather-showers'),
-    386: ('⛈️', 'weather-storm'),
-    389: ('⛈️', 'weather-storm'),
-    392: ('⛈️', 'weather-storm'),
-    395: ('⛈️', 'weather-storm'),
+# Maps WMO weather code (open-meteo) → (emoji, GNOME stock icon name, description)
+WMO_CODES = {
+    0:  ('☀️',  'weather-clear',            'Clear sky'),
+    1:  ('☀️',  'weather-clear',            'Mainly clear'),
+    2:  ('⛅',  'weather-few-clouds',        'Partly cloudy'),
+    3:  ('☁️',  'weather-overcast',          'Overcast'),
+    45: ('🌫️', 'weather-fog',               'Foggy'),
+    48: ('🌫️', 'weather-fog',               'Icy fog'),
+    51: ('🌦️', 'weather-showers-scattered', 'Light drizzle'),
+    53: ('🌦️', 'weather-showers-scattered', 'Drizzle'),
+    55: ('🌦️', 'weather-showers-scattered', 'Dense drizzle'),
+    56: ('🌧️', 'weather-showers',           'Freezing drizzle'),
+    57: ('🌧️', 'weather-showers',           'Heavy freezing drizzle'),
+    61: ('🌦️', 'weather-showers-scattered', 'Slight rain'),
+    63: ('🌧️', 'weather-showers',           'Moderate rain'),
+    65: ('🌧️', 'weather-showers',           'Heavy rain'),
+    66: ('🌧️', 'weather-showers',           'Freezing rain'),
+    67: ('🌧️', 'weather-showers',           'Heavy freezing rain'),
+    71: ('🌨️', 'weather-snow',              'Slight snow'),
+    73: ('🌨️', 'weather-snow',              'Moderate snow'),
+    75: ('❄️',  'weather-snow',              'Heavy snow'),
+    77: ('❄️',  'weather-snow',              'Snow grains'),
+    80: ('🌦️', 'weather-showers-scattered', 'Slight showers'),
+    81: ('🌧️', 'weather-showers',           'Moderate showers'),
+    82: ('🌧️', 'weather-showers',           'Violent showers'),
+    85: ('🌨️', 'weather-snow',              'Slight snow showers'),
+    86: ('❄️',  'weather-snow',              'Heavy snow showers'),
+    95: ('⛈️', 'weather-storm',             'Thunderstorm'),
+    96: ('⛈️', 'weather-storm',             'Thunderstorm w/ hail'),
+    99: ('⛈️', 'weather-storm',             'Thunderstorm w/ hail'),
 }
-
-def wx_emoji(code):
-    return WX_ICON.get(code, ('🌡️', 'weather-severe-alert'))[0]
-
-def wx_stock(code):
-    return WX_ICON.get(code, ('🌡️', 'weather-severe-alert'))[1]
 
 # ── Styling ──────────────────────────────────────────────────────────────────
 
@@ -144,33 +119,101 @@ def save_config(cfg):
 
 # ── Weather fetch / parse ────────────────────────────────────────────────────
 
-def fetch_weather(city=''):
-    url = f'https://wttr.in/{city}?format=j1'
+# Build an SSL context that works even when launched outside a shell (e.g. from
+# a desktop autostart entry) where SSL_CERT_FILE / SSL_CERT_DIR may be unset.
+_SSL_CAFILE = '/etc/ssl/certs/ca-certificates.crt'   # standard on Debian/Ubuntu
+_SSL_CTX = ssl.create_default_context(
+    cafile=_SSL_CAFILE if os.path.exists(_SSL_CAFILE) else None
+)
+
+
+LOG_FILE = os.path.expanduser('~/.config/weather-bar/weather-bar.log')
+
+
+def _log(msg):
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(LOG_FILE, 'a') as f:
+            import datetime
+            f.write(f'{datetime.datetime.now():%Y-%m-%d %H:%M:%S}  {msg}\n')
+    except Exception:
+        pass
+
+
+def _api_get(url):
     req = urllib.request.Request(url, headers={'User-Agent': 'weather-bar/1.0'})
-    with urllib.request.urlopen(req, timeout=10) as r:
+    with urllib.request.urlopen(req, timeout=8, context=_SSL_CTX) as r:
         return json.loads(r.read())
 
 
-def parse_weather(data, unit='C', city_override=''):
-    cur  = data['current_condition'][0]
-    area = data['nearest_area'][0]
+def fetch_weather(city=''):
+    """Fetch weather via open-meteo (no API key required).
 
-    country = area['country'][0]['value']
-    # Prefer the user-configured city name; fall back to API area name
-    city    = city_override.strip() or area['areaName'][0]['value']
-    code    = int(cur['weatherCode'])
-    temp    = cur['temp_F' if unit == 'F' else 'temp_C'] + f'°{unit}'
-    desc    = cur['weatherDesc'][0]['value']
-    hum     = cur['humidity']
-    wind    = cur['windspeedKmph']
+    If *city* is given it is geocoded first; otherwise the current IP location
+    is used via ipinfo.io.  Returns a normalised dict consumed by parse_weather.
+    """
+    if city:
+        geo = _api_get(
+            'https://geocoding-api.open-meteo.com/v1/search?'
+            + urllib.parse.urlencode({'name': city, 'count': 1, 'language': 'en'})
+        )
+        results = geo.get('results', [])
+        if not results:
+            raise ValueError(f'City not found: {city!r}')
+        r         = results[0]
+        lat, lon  = r['latitude'], r['longitude']
+        city_name = r['name']
+        country   = r.get('country', r.get('country_code', ''))
+    else:
+        ip        = _api_get('https://ipinfo.io/json')
+        lat, lon  = (float(x) for x in ip['loc'].split(','))
+        city_name = ip.get('city', '')
+        country   = ip.get('country', '')
+
+    wx = _api_get(
+        'https://api.open-meteo.com/v1/forecast?'
+        + urllib.parse.urlencode({
+            'latitude':        lat,
+            'longitude':       lon,
+            'current':         'temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code',
+            'wind_speed_unit': 'kmh',
+        })
+    )['current']
+
+    # Support both old (weathercode/windspeed_10m) and new (weather_code/wind_speed_10m) API keys
+    wind = wx.get('wind_speed_10m', wx.get('windspeed_10m', 0))
+    code = wx.get('weather_code', wx.get('weathercode', 0))
 
     return {
-        'line':     f'{wx_emoji(code)}  {temp}  {desc}   💧{hum}%   💨{wind} km/h',
-        'location': f'📍 {city}, {country}',
-        'tray_tip': f'{wx_emoji(code)} {city}  {temp}  {desc}\n💧 Humidity: {hum}%   💨 Wind: {wind} km/h',
-        'tray_icon': wx_stock(code),
-        'temp':     temp,
-        'code':     code,
+        'temp_C':   wx['temperature_2m'],
+        'humidity': wx['relative_humidity_2m'],
+        'wind_kmh': round(wind, 1),
+        'code':     int(code),
+        'city':     city_name,
+        'country':  country,
+    }
+
+
+def parse_weather(data, unit='C', city_override=''):
+    code             = data['code']
+    emoji, icon, desc = WMO_CODES.get(code, ('🌡️', 'weather-severe-alert', 'Unknown'))
+
+    temp_c   = data['temp_C']
+    temp_val = temp_c if unit == 'C' else round(temp_c * 9 / 5 + 32, 1)
+    temp     = f'{temp_val}°{unit}'
+
+    hum     = data['humidity']
+    wind    = data['wind_kmh']
+    city    = city_override.strip() or data['city']
+    country = data['country']
+
+    return {
+        'line':      f'{emoji}  {temp}  {desc}   💧{hum}%   💨{wind} km/h',
+        'location':  f'📍 {city}, {country}',
+        'tray_tip':  f'{emoji} {city}  {temp}  {desc}\n💧 Humidity: {hum}%   💨 Wind: {wind} km/h',
+        'tray_icon': icon,
+        'temp':      temp,
+        'code':      code,
     }
 
 
@@ -254,6 +297,9 @@ class WeatherBar(Gtk.Window):
         self.set_type_hint(Gdk.WindowTypeHint.DOCK)
         self.set_app_paintable(True)
 
+        self.connect('realize', lambda *_: self._position())
+        self.connect('size-allocate', lambda *_: GLib.idle_add(self._recenter))
+
         screen = self.get_screen()
         visual = screen.get_rgba_visual()
         if visual:
@@ -288,11 +334,26 @@ class WeatherBar(Gtk.Window):
         self.connect('button-press-event', self._on_click)
 
     def _position(self):
-        display = Gdk.Display.get_default()
-        idx     = min(self.cfg['monitor'], display.get_n_monitors() - 1)
-        geo     = display.get_monitor(idx).get_geometry()
-        self.set_default_size(geo.width, BAR_HEIGHT)
-        self.move(geo.x, geo.y)
+        display  = Gdk.Display.get_default()
+        idx      = min(self.cfg['monitor'], display.get_n_monitors() - 1)
+        monitor  = display.get_monitor(idx)
+        workarea = monitor.get_workarea()
+        self._workarea = workarea
+        # Size the window to its natural content width — no full-width overlay
+        # that would block clicks on other windows (e.g. Firefox title bar).
+        self.set_size_request(-1, BAR_HEIGHT)
+        self.resize(1, BAR_HEIGHT)
+
+    def _recenter(self):
+        """Re-position the pill at the top-center of the monitor."""
+        wa = getattr(self, '_workarea', None)
+        if wa is None:
+            return False
+        w = self.get_allocated_width()
+        if w <= 1:
+            return False
+        self.move(wa.x + (wa.width - w) // 2, wa.y)
+        return False
 
     # ── Data ─────────────────────────────────────────────────────────────────
 
@@ -303,12 +364,24 @@ class WeatherBar(Gtk.Window):
         threading.Thread(target=self._fetch_thread, daemon=True).start()
 
     def _fetch_thread(self):
-        try:
-            data = fetch_weather(self.cfg.get('city', ''))
-            wx   = parse_weather(data, self.cfg.get('unit', 'C'), self.cfg.get('city', ''))
-            GLib.idle_add(self._apply, wx, None)
-        except Exception as e:
-            GLib.idle_add(self._apply, None, str(e))
+        import time
+        city = self.cfg.get('city', '')
+        unit = self.cfg.get('unit', 'C')
+        last_err = None
+        for attempt in range(2):
+            if attempt:
+                time.sleep(5)
+            try:
+                _log(f'fetch attempt {attempt + 1}, city={city!r}')
+                data = fetch_weather(city)
+                wx   = parse_weather(data, unit, city)
+                _log(f'fetch ok: {wx["line"]}')
+                GLib.idle_add(self._apply, wx, None)
+                return
+            except Exception as e:
+                last_err = e
+                _log(f'fetch error: {e}')
+        GLib.idle_add(self._apply, None, str(last_err))
 
     def _apply(self, wx, err):
         if err:
