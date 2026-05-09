@@ -2,6 +2,9 @@
 
 A slim, transparent weather overlay for the GNOME desktop. Shows current conditions in a pill-shaped bar pinned to the top-center of the screen, plus a system-tray icon.
 
+[![Latest release](https://img.shields.io/github/v/release/aquiles204/weather-bar?label=Download&logo=github)](https://github.com/aquiles204/weather-bar/releases/latest/download/weather-bar_1.6_all.deb)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 ![weather-bar screenshot](https://raw.githubusercontent.com/aquiles204/weather-bar/master/screenshot.png)
 
 ## Features
@@ -23,9 +26,8 @@ Ubuntu / Debian users get these by default with a GNOME desktop.
 
 ## Install (Debian / Ubuntu)
 
-Download the latest `.deb` from [Releases](https://github.com/aquiles204/weather-bar/releases) and install:
-
 ```bash
+wget https://github.com/aquiles204/weather-bar/releases/latest/download/weather-bar_1.6_all.deb
 sudo dpkg -i weather-bar_1.6_all.deb
 ```
 
