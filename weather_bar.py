@@ -3,7 +3,10 @@
 
 Shows current weather in a transparent bar pinned to the top of the screen
 and as a system-tray icon.
-Data source: wttr.in (no API key needed).
+Data source: open-meteo (no API key needed).
+
+On Wayland sessions (Ubuntu 26.04+) the bar runs through XWayland: a native
+Wayland client cannot place itself on screen or stay above other windows.
 
 Usage:
   python3 weather_bar.py [--city CITY] [--unit C|F] [--monitor N]
@@ -15,8 +18,13 @@ Requirements (standard on Ubuntu GNOME):
   sudo apt install python3-gi gir1.2-gtk-3.0
 """
 
+import os
 import warnings
 warnings.filterwarnings('ignore', category=DeprecationWarning)
+
+# window.move(), keep-above, the DOCK hint and Gtk.StatusIcon only exist on
+# X11, so prefer XWayland on Wayland sessions.  Must be set before GTK loads.
+os.environ.setdefault('GDK_BACKEND', 'x11,wayland')
 
 import gi
 gi.require_version('Gtk', '3.0')
@@ -28,7 +36,6 @@ GLib.log_set_handler('Gtk', GLib.LogLevelFlags.LEVEL_CRITICAL, lambda *_: None)
 
 import argparse
 import json
-import os
 import ssl
 import threading
 import urllib.parse
@@ -125,6 +132,9 @@ _SSL_CAFILE = '/etc/ssl/certs/ca-certificates.crt'   # standard on Debian/Ubuntu
 _SSL_CTX = ssl.create_default_context(
     cafile=_SSL_CAFILE if os.path.exists(_SSL_CAFILE) else None
 )
+# urllib only advertises ALPN on contexts it creates itself; without it
+# ipinfo.io answers "406 Not Acceptable".
+_SSL_CTX.set_alpn_protocols(['http/1.1'])
 
 
 LOG_FILE = os.path.expanduser('~/.config/weather-bar/weather-bar.log')
@@ -301,6 +311,13 @@ class WeatherBar(Gtk.Window):
         self.connect('size-allocate', lambda *_: GLib.idle_add(self._recenter))
 
         screen = self.get_screen()
+        # The work area changes once the shell's top panel appears (it may not
+        # exist yet when we are autostarted at login) or when monitors change.
+        screen.connect('monitors-changed', lambda *_: self._recenter())
+        screen.connect('size-changed',     lambda *_: self._recenter())
+        for delay in (2, 5, 15):
+            GLib.timeout_add_seconds(delay, self._recenter)
+
         visual = screen.get_rgba_visual()
         if visual:
             self.set_visual(visual)
@@ -333,12 +350,12 @@ class WeatherBar(Gtk.Window):
         self.add(outer)
         self.connect('button-press-event', self._on_click)
 
+    def _get_workarea(self):
+        display = Gdk.Display.get_default()
+        idx     = min(self.cfg['monitor'], display.get_n_monitors() - 1)
+        return display.get_monitor(idx).get_workarea()
+
     def _position(self):
-        display  = Gdk.Display.get_default()
-        idx      = min(self.cfg['monitor'], display.get_n_monitors() - 1)
-        monitor  = display.get_monitor(idx)
-        workarea = monitor.get_workarea()
-        self._workarea = workarea
         # Size the window to its natural content width — no full-width overlay
         # that would block clicks on other windows (e.g. Firefox title bar).
         self.set_size_request(-1, BAR_HEIGHT)
@@ -346,10 +363,10 @@ class WeatherBar(Gtk.Window):
 
     def _recenter(self):
         """Re-position the pill at the top-center of the monitor."""
-        wa = getattr(self, '_workarea', None)
-        if wa is None:
-            return False
-        w = self.get_allocated_width()
+        # Always re-query: a cached work area goes stale when the panel
+        # shows up after us, leaving the bar on top of the GNOME clock.
+        wa = self._get_workarea()
+        w  = self.get_allocated_width()
         if w <= 1:
             return False
         self.move(wa.x + (wa.width - w) // 2, wa.y)
@@ -391,6 +408,7 @@ class WeatherBar(Gtk.Window):
             self.main_lbl.set_text(wx['line'])
             self.loc_lbl.set_text(wx['location'])
             self._tray.update(wx)
+        self._recenter()
         return False   # idle_add one-shot
 
     def _tick(self):
